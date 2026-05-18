@@ -65,6 +65,16 @@ the best available shell:
 
 No manual shell selection is needed; just run `./http.bash` as usual.
 
+**macOS dependencies for development:**
+
+```bash
+brew install shellcheck       # linter (required by `make lint`)
+python3 -m venv .venv        # create a virtualenv (system Python is externally managed)
+.venv/bin/pip install -r requirements.txt  # install pytest
+```
+
+Runtime dependencies (`openssl`, `cat`, `zsh`) are pre-installed on macOS.
+
 ## Installation
 
 ```bash

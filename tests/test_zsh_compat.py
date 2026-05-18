@@ -20,17 +20,17 @@ pytestmark = pytest.mark.skipif(
 
 
 def _zsh_coproc_fds_ok() -> bool:
-    """Return True if zsh exposes COPROC FD numbers after starting a coproc.
+    """Return True if zsh can access coproc FDs via ``exec {var}<&p``.
 
-    Some non-standard zsh builds (e.g. Zoox-modified 5.9) do not populate the
-    $COPROC array, making the openssl s_client coproc path unusable.  The HTTPS
-    tests are skipped automatically in those environments.
+    The script uses ``exec {fd}<&p`` / ``exec {fd}>&p`` to grab coproc file
+    descriptors.  This works on stock zsh 5.x but may fail on non-standard
+    builds that strip the ``&p`` redirection support.
     """
     if shutil.which("zsh") is None:
         return False
-    # Use a coproc that stays alive long enough to probe $COPROC, then kill it.
     r = subprocess.run(
-        ["zsh", "-c", 'coproc { sleep 10; }; rc=1; [[ -n "${COPROC[1]}" ]] && rc=0; kill $! 2>/dev/null; exit $rc'],
+        ["zsh", "-c",
+         'coproc { sleep 10; }; rc=1; exec {rd}<&p && exec {wr}>&p && rc=0; kill $! 2>/dev/null; exit $rc'],
         capture_output=True,
         timeout=5,
     )

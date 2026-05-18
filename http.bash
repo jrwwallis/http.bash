@@ -123,9 +123,8 @@ _tcp_connect() {
 # Sets conn_read_fd, conn_write_fd, tls_pid, conn_is_tls=1.
 #
 # Both branches use `coproc { ... }` syntax (valid in bash and zsh).
-# COPROC indexing differs: bash uses 0-indexed, zsh uses 1-indexed arrays.
-# eval hides bash 4.1+ {var}<&N dynamic FD allocation from zsh's parser,
-# which parses all branches syntactically even when they don't execute.
+# zsh unnamed coprocs expose FDs via <&p / >&p (no COPROC array);
+# bash exposes them via COPROC[0] (read) and COPROC[1] (write).
 _tls_connect() {
   command -v openssl &>/dev/null || die "openssl is required for HTTPS"
   # shellcheck disable=SC2031,SC2154  # $COPROC is set by coproc builtin
@@ -133,10 +132,10 @@ _tls_connect() {
     -connect "$1:$2" -servername "$1" 2>/dev/null; }
   tls_pid=$!
   if [[ -n "${_IS_ZSH}" ]]; then
-    # zsh (1-indexed): COPROC[1]=read(stdout), COPROC[2]=write(stdin).
-    # Dup the read end to a fixed FD to survive coproc teardown.
-    exec 10<&"${COPROC[1]}"
-    conn_read_fd=10; conn_write_fd="${COPROC[2]}"
+    # zsh: dup coproc stdout/stdin via the p descriptor.
+    # {var}<&p allocates an FD and stores its number in the variable.
+    exec {conn_read_fd}<&p
+    exec {conn_write_fd}>&p
   else
     # bash (0-indexed): COPROC[0]=read(stdout), COPROC[1]=write(stdin).
     local _read_fd
@@ -146,10 +145,23 @@ _tls_connect() {
   conn_is_tls=1
 }
 
-# Header-dump FD: fixed to avoid needing bash 4.1 dynamic FD allocation in zsh.
-_DUMP_FD=11
-_open_write_fd()  { eval "exec ${_DUMP_FD}>\"$1\""; }
-_close_write_fd() { eval "exec ${_DUMP_FD}>&-"; }
+# Header-dump FD helpers. zsh cannot use multi-digit FDs in `exec N>file`
+# syntax; use {var}>file instead which allocates a FD dynamically.
+_DUMP_FD=''
+_open_write_fd() {
+  if [[ -n "${_IS_ZSH}" ]]; then
+    exec {_DUMP_FD}>"$1"
+  else
+    eval "exec {_DUMP_FD}>\"$1\""
+  fi
+}
+_close_write_fd() {
+  if [[ -n "${_IS_ZSH}" ]]; then
+    exec {_DUMP_FD}>&-
+  else
+    eval "exec ${_DUMP_FD}>&-"
+  fi
+}
 
 # -- Argument parsing --
 while [[ $# -gt 0 ]]; do
@@ -248,11 +260,15 @@ open_connection() {
 
 close_connection() {
   if [[ -n "${conn_is_tls}" && -n "${tls_pid}" ]]; then
-    # Command groups scope the 2>/dev/null so it doesn't permanently
-    # redirect the shell's stderr (bare "exec N>&- 2>/dev/null" would).
-    { eval "exec ${conn_write_fd}>&-"; } 2>/dev/null || true
-    wait "${tls_pid}" 2>/dev/null || true
-    { eval "exec ${conn_read_fd}<&-"; } 2>/dev/null || true
+    if [[ -n "${_IS_ZSH}" ]]; then
+      { exec {conn_write_fd}>&-; } 2>/dev/null || true
+      wait "${tls_pid}" 2>/dev/null || true
+      { exec {conn_read_fd}<&-; } 2>/dev/null || true
+    else
+      { eval "exec ${conn_write_fd}>&-"; } 2>/dev/null || true
+      wait "${tls_pid}" 2>/dev/null || true
+      { eval "exec ${conn_read_fd}<&-"; } 2>/dev/null || true
+    fi
     tls_pid=''
   elif [[ -n "${_IS_ZSH}" ]]; then
     if [[ -n "${conn_read_fd}" ]]; then { ztcp -c "${conn_read_fd}"; } 2>/dev/null || true; fi

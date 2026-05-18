@@ -1,6 +1,6 @@
 SHELL   := bash
 SCRIPT  := http.bash
-PYTEST  := python3 -m pytest
+PYTEST  := .venv/bin/python3 -m pytest
 TESTS   := tests/test_get.py tests/test_errors.py tests/test_cli.py \
            tests/test_redirects.py tests/test_https.py
 
