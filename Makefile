@@ -1,6 +1,7 @@
 SHELL   := bash
 SCRIPT  := http.bash
-PYTEST  := .venv/bin/python3 -m pytest
+PYTHON  := $(shell if [ -x .venv/bin/python3 ]; then echo .venv/bin/python3; else echo python3; fi)
+PYTEST  := $(PYTHON) -m pytest
 TESTS   := tests/test_get.py tests/test_errors.py tests/test_cli.py \
            tests/test_redirects.py tests/test_https.py
 
