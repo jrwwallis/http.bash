@@ -14,13 +14,13 @@ if [[ -z "${_HTTP_SHELL_SELECTED}" ]]; then
      [[ "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -ge 1 ]]; then
     _HTTP_SHELL_SELECTED=bash
   else
-    for _sh in bash-5 bash5 bash-4 bash4 bash; do
-      if command -v "${_sh}" &>/dev/null; then
-        # shellcheck disable=SC2016  # single quotes intentional: expr runs in $_sh
-        _v=$("${_sh}" -c 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"' 2>/dev/null)
-        case "${_v}" in
+    for _candidate in bash-5 bash5 bash-4 bash4 bash; do
+      if command -v "${_candidate}" &>/dev/null; then
+        # shellcheck disable=SC2016  # single quotes intentional: expr runs in $_candidate
+        _bash_ver=$("${_candidate}" -c 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"' 2>/dev/null)
+        case "${_bash_ver}" in
           [5-9].*|4.[1-9]*|4.[1-9][0-9]*)
-            _HTTP_SHELL_SELECTED="${_sh}" exec "${_sh}" -- "$0" "$@" ;;
+            _HTTP_SHELL_SELECTED="${_candidate}" exec "${_candidate}" -- "$0" "$@" ;;
         esac
       fi
     done
@@ -79,20 +79,20 @@ usage() {
 
 # -- Compatibility shims (bash 4.1+ / zsh 5.x) --
 
-# _regex STR PATTERN — match STR against PATTERN and populate _m[].
-# _m[1]=group1, _m[2]=group2, ... (same indexing in bash and zsh because
+# _regex STR PATTERN — match STR against PATTERN and populate _regex_groups[].
+# _regex_groups[1]=group1, [2]=group2, ... (same indexing in bash and zsh because
 # BASH_REMATCH[N] and zsh $match[N] both store group N at index N).
 _regex() {
-  local _str="$1" _pat="$2"
+  local str="$1" pattern="$2"
   if [[ -n "${_IS_ZSH}" ]]; then
     # shellcheck disable=SC2154  # $match is the zsh regex capture array
-    if [[ "${_str}" =~ ${_pat} ]]; then
-      _m=("${match[@]}"); return 0
+    if [[ "${str}" =~ ${pattern} ]]; then
+      _regex_groups=("${match[@]}"); return 0
     fi
     return 1
   else
-    if [[ "${_str}" =~ ${_pat} ]]; then
-      _m=("${BASH_REMATCH[@]}"); return 0
+    if [[ "${str}" =~ ${pattern} ]]; then
+      _regex_groups=("${BASH_REMATCH[@]}"); return 0
     fi
     return 1
   fi
@@ -100,10 +100,10 @@ _regex() {
 
 # _tolower STR — print STR lowercased; typeset -l works in bash 4.0+ and zsh.
 _tolower() {
-  local _lo
-  typeset -l _lo
-  _lo="$1"
-  printf '%s' "${_lo}"
+  local _lower
+  typeset -l _lower
+  _lower="$1"
+  printf '%s' "${_lower}"
 }
 
 # _tcp_connect HOST PORT — open a plain TCP socket.
@@ -139,9 +139,9 @@ _tls_connect() {
     conn_read_fd=10; conn_write_fd="${COPROC[2]}"
   else
     # bash (0-indexed): COPROC[0]=read(stdout), COPROC[1]=write(stdin).
-    local _rd
-    eval "exec {_rd}<&${COPROC[0]}"
-    conn_read_fd="${_rd}"; conn_write_fd="${COPROC[1]}"
+    local _read_fd
+    eval "exec {_read_fd}<&${COPROC[0]}"
+    conn_read_fd="${_read_fd}"; conn_write_fd="${COPROC[1]}"
   fi
   conn_is_tls=1
 }
@@ -202,17 +202,17 @@ fi
 
 # -- URL parsing --
 parse_url() {
-  local raw="$1"
-  local re='^((https?)://)?([A-Za-z0-9._~%-]+)(:([0-9]+))?(/[^#]*)?(#.*)?$'
-  if _regex "${raw}" "${re}"; then
-    url_scheme="${_m[2]:-http}"
-    url_host="${_m[3]}"
-    url_port="${_m[5]}"
-    url_path="${_m[6]:-/}"
+  local raw_url="$1"
+  local url_re='^((https?)://)?([A-Za-z0-9._~%-]+)(:([0-9]+))?(/[^#]*)?(#.*)?$'
+  if _regex "${raw_url}" "${url_re}"; then
+    url_scheme="${_regex_groups[2]:-http}"
+    url_host="${_regex_groups[3]}"
+    url_port="${_regex_groups[5]}"
+    url_path="${_regex_groups[6]:-/}"
   else
-    die "Malformed URL: ${raw}"
+    die "Malformed URL: ${raw_url}"
   fi
-  [[ -z "${url_host}" ]] && die "No host in URL: ${raw}"
+  [[ -z "${url_host}" ]] && die "No host in URL: ${raw_url}"
   [[ -z "${url_port}" ]] && { [[ "${url_scheme}" == "https" ]] && url_port=443 || url_port=80; }
 }
 
@@ -232,8 +232,8 @@ resolve_url() {
     //*) printf '%s:%s' "${url_scheme}" "${location}" ;;
     /*)  printf '%s://%s%s%s' "${url_scheme}" "${url_host}" "$(port_suffix)" "${location}" ;;
     *)
-      local dir="${url_path%/*}"
-      printf '%s://%s%s%s/%s' "${url_scheme}" "${url_host}" "$(port_suffix)" "${dir%/}" "${location}" ;;
+      local url_dir="${url_path%/*}"
+      printf '%s://%s%s%s/%s' "${url_scheme}" "${url_host}" "$(port_suffix)" "${url_dir%/}" "${location}" ;;
   esac
 }
 
@@ -268,27 +268,27 @@ trap close_connection EXIT
 
 # -- Request --
 send_request() {
-  local meth="$1"
+  local method="$1"
   # HTTP/1.0 avoids chunked transfer encoding; identity avoids compression.
-  vlog "> ${meth} ${url_path} HTTP/1.0"
-  printf '%s %s HTTP/1.0\r\n' "${meth}" "${url_path}" >&"${conn_write_fd}"
+  vlog "> ${method} ${url_path} HTTP/1.0"
+  printf '%s %s HTTP/1.0\r\n' "${method}" "${url_path}" >&"${conn_write_fd}"
 
-  local host_hdr
-  host_hdr="${url_host}$(port_suffix)"
-  printf 'Host: %s\r\n' "${host_hdr}" >&"${conn_write_fd}"
-  vlog "> Host: ${host_hdr}"
+  local host_header
+  host_header="${url_host}$(port_suffix)"
+  printf 'Host: %s\r\n' "${host_header}" >&"${conn_write_fd}"
+  vlog "> Host: ${host_header}"
 
   printf 'Accept-Encoding: identity\r\n' >&"${conn_write_fd}"
   vlog '> Accept-Encoding: identity'
 
-  local ua="${opt_agent:-http.bash/1.0}"
-  printf 'User-Agent: %s\r\n' "${ua}" >&"${conn_write_fd}"
-  vlog "> User-Agent: ${ua}"
+  local user_agent="${opt_agent:-http.bash/1.0}"
+  printf 'User-Agent: %s\r\n' "${user_agent}" >&"${conn_write_fd}"
+  vlog "> User-Agent: ${user_agent}"
 
-  local h
-  for h in "${opt_headers[@]}"; do
-    printf '%s\r\n' "${h}" >&"${conn_write_fd}"
-    vlog "> ${h}"
+  local header
+  for header in "${opt_headers[@]}"; do
+    printf '%s\r\n' "${header}" >&"${conn_write_fd}"
+    vlog "> ${header}"
   done
 
   if [[ -n "${opt_auth}" ]]; then
@@ -322,22 +322,22 @@ read_status_line() {
   local timeout_flag=()
   [[ -n "${opt_connect_timeout}" ]] && timeout_flag=(-t "${opt_connect_timeout}")
 
-  local raw
-  if ! IFS= read -r "${timeout_flag[@]}" -u "${conn_read_fd}" raw; then
+  local raw_line
+  if ! IFS= read -r "${timeout_flag[@]}" -u "${conn_read_fd}" raw_line; then
     [[ -n "${opt_connect_timeout}" ]] \
       && die "Timed out waiting for response from ${url_host}"
     die "Connection closed before status line received"
   fi
-  local line="${raw%$'\r'}"
-  vlog "< ${line}"
-  [[ -n "${opt_head}" ]] && printf '%s\n' "${line}"
+  local status_line="${raw_line%$'\r'}"
+  vlog "< ${status_line}"
+  [[ -n "${opt_head}" ]] && printf '%s\n' "${status_line}"
 
-  local re='^HTTP/([0-9.]+) +([0-9]+) *(.*)$'
-  if _regex "${line}" "${re}"; then
-    resp_code="${_m[2]}"
-    resp_msg="${_m[3]}"
+  local status_re='^HTTP/([0-9.]+) +([0-9]+) *(.*)$'
+  if _regex "${status_line}" "${status_re}"; then
+    resp_code="${_regex_groups[2]}"
+    resp_msg="${_regex_groups[3]}"
   else
-    die "Malformed HTTP status line: ${line}"
+    die "Malformed HTTP status line: ${status_line}"
   fi
 }
 
@@ -350,17 +350,17 @@ read_response_headers() {
     dump_fd="${_DUMP_FD}"
   fi
 
-  local raw line lname
-  local re='^([A-Za-z0-9-]+): *(.*)$'
-  while IFS= read -r -u "${conn_read_fd}" raw; do
-    line="${raw%$'\r'}"
-    [[ -z "${line}" ]] && break
-    vlog "< ${line}"
-    [[ -n "${dump_fd}" ]] && printf '%s\n' "${line}" >&"${dump_fd}"
-    [[ -n "${opt_head}" ]] && printf '%s\n' "${line}"
-    if _regex "${line}" "${re}"; then
-      lname="$(_tolower "${_m[1]}")"
-      [[ "${lname}" == "location" ]] && resp_location="${_m[2]}"
+  local raw_line header_line header_name
+  local header_re='^([A-Za-z0-9-]+): *(.*)$'
+  while IFS= read -r -u "${conn_read_fd}" raw_line; do
+    header_line="${raw_line%$'\r'}"
+    [[ -z "${header_line}" ]] && break
+    vlog "< ${header_line}"
+    [[ -n "${dump_fd}" ]] && printf '%s\n' "${header_line}" >&"${dump_fd}"
+    [[ -n "${opt_head}" ]] && printf '%s\n' "${header_line}"
+    if _regex "${header_line}" "${header_re}"; then
+      header_name="$(_tolower "${_regex_groups[1]}")"
+      [[ "${header_name}" == "location" ]] && resp_location="${_regex_groups[2]}"
     fi
   done
 
