@@ -1,16 +1,41 @@
 #!/bin/bash
-# http.bash — minimal HTTP/HTTPS client using bash built-ins.
+# http.bash — minimal HTTP/HTTPS client.
 # Flags follow curl conventions; run --help for usage.
-# Requires bash 4.1+ (named coproc and dynamic FD allocation for HTTPS).
-# macOS ships bash 3.2; install a newer bash via Homebrew if needed.
-# External deps (intentional exceptions to the bash-only rule):
+# Requires bash 4.1+ or zsh 5.x. On macOS the bootstrap below auto-selects
+# zsh (the default shell) when no suitable bash is installed.
+# External deps (intentional exceptions to the shell-only rule):
 #   openssl — TLS (HTTPS) and base64 for -u auth
-#   cat     — binary-safe body transfer (bash read drops null bytes)
+#   cat     — binary-safe body transfer (shell read drops null bytes)
 
-if [[ "${BASH_VERSINFO[0]}" -lt 4 ]] ||
-   [[ "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -lt 1 ]]; then
-  printf 'http.bash: requires bash 4.1+, got %s\n' "${BASH_VERSION}" >&2
-  exit 1
+# -- Bootstrap: ensure we're running in bash 4.1+ or zsh 5.x --
+# _HTTP_SHELL_SELECTED is exported to the re-exec'd process to prevent loops.
+if [[ -z "${_HTTP_SHELL_SELECTED}" ]]; then
+  if [[ "${BASH_VERSINFO[0]}" -gt 4 ]] ||
+     [[ "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -ge 1 ]]; then
+    _HTTP_SHELL_SELECTED=bash
+  else
+    for _sh in bash-5 bash5 bash-4 bash4 bash; do
+      if command -v "${_sh}" &>/dev/null; then
+        # shellcheck disable=SC2016  # single quotes intentional: expr runs in $_sh
+        _v=$("${_sh}" -c 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"' 2>/dev/null)
+        case "${_v}" in
+          [5-9].*|4.[1-9]*|4.[1-9][0-9]*)
+            _HTTP_SHELL_SELECTED="${_sh}" exec "${_sh}" -- "$0" "$@" ;;
+        esac
+      fi
+    done
+    if command -v zsh &>/dev/null; then
+      _HTTP_SHELL_SELECTED=zsh exec zsh -- "$0" "$@"
+    fi
+    printf 'http.bash: needs bash 4.1+ or zsh 5.x; neither found\n' >&2
+    exit 1
+  fi
+fi
+
+# -- Shell detection and zsh-specific setup --
+[[ -n "${ZSH_VERSION}" ]] && _IS_ZSH=1 || _IS_ZSH=''
+if [[ -n "${_IS_ZSH}" ]]; then
+  zmodload zsh/net/tcp || { printf 'http.bash: zsh/net/tcp module required\n' >&2; exit 1; }
 fi
 
 set -o pipefail
@@ -26,7 +51,7 @@ usage() {
   printf '%s\n' \
     'Usage: http.bash [OPTIONS] URL' \
     '' \
-    'Minimal HTTP/HTTPS client (bash built-ins + openssl for HTTPS).' \
+    'Minimal HTTP/HTTPS client (bash/zsh built-ins + openssl for HTTPS).' \
     'Flags follow curl conventions.' \
     '' \
     'Options:' \
@@ -51,6 +76,80 @@ usage() {
     '  cat      Binary-safe body output' \
     >&2
 }
+
+# -- Compatibility shims (bash 4.1+ / zsh 5.x) --
+
+# _regex STR PATTERN — match STR against PATTERN and populate _m[].
+# _m[1]=group1, _m[2]=group2, ... (same indexing in bash and zsh because
+# BASH_REMATCH[N] and zsh $match[N] both store group N at index N).
+_regex() {
+  local _str="$1" _pat="$2"
+  if [[ -n "${_IS_ZSH}" ]]; then
+    # shellcheck disable=SC2154  # $match is the zsh regex capture array
+    if [[ "${_str}" =~ ${_pat} ]]; then
+      _m=("${match[@]}"); return 0
+    fi
+    return 1
+  else
+    if [[ "${_str}" =~ ${_pat} ]]; then
+      _m=("${BASH_REMATCH[@]}"); return 0
+    fi
+    return 1
+  fi
+}
+
+# _tolower STR — print STR lowercased; typeset -l works in bash 4.0+ and zsh.
+_tolower() {
+  local _lo
+  typeset -l _lo
+  _lo="$1"
+  printf '%s' "${_lo}"
+}
+
+# _tcp_connect HOST PORT — open a plain TCP socket.
+# Sets conn_read_fd, conn_write_fd, conn_is_tls=''.
+_tcp_connect() {
+  if [[ -n "${_IS_ZSH}" ]]; then
+    ztcp "$1" "$2" || die "Could not connect to $1:$2"
+    conn_read_fd="${REPLY}"; conn_write_fd="${REPLY}"
+  else
+    exec 3<>"/dev/tcp/$1/$2" || die "Could not connect to $1:$2"
+    conn_read_fd=3; conn_write_fd=3
+  fi
+  conn_is_tls=''
+}
+
+# _tls_connect HOST PORT — open a TLS connection via openssl s_client coproc.
+# Sets conn_read_fd, conn_write_fd, tls_pid, conn_is_tls=1.
+#
+# Both branches use `coproc { ... }` syntax (valid in bash and zsh).
+# COPROC indexing differs: bash uses 0-indexed, zsh uses 1-indexed arrays.
+# eval hides bash 4.1+ {var}<&N dynamic FD allocation from zsh's parser,
+# which parses all branches syntactically even when they don't execute.
+_tls_connect() {
+  command -v openssl &>/dev/null || die "openssl is required for HTTPS"
+  # shellcheck disable=SC2031,SC2154  # $COPROC is set by coproc builtin
+  coproc { exec openssl s_client -quiet \
+    -connect "$1:$2" -servername "$1" 2>/dev/null; }
+  tls_pid=$!
+  if [[ -n "${_IS_ZSH}" ]]; then
+    # zsh (1-indexed): COPROC[1]=read(stdout), COPROC[2]=write(stdin).
+    # Dup the read end to a fixed FD to survive coproc teardown.
+    exec 10<&"${COPROC[1]}"
+    conn_read_fd=10; conn_write_fd="${COPROC[2]}"
+  else
+    # bash (0-indexed): COPROC[0]=read(stdout), COPROC[1]=write(stdin).
+    local _rd
+    eval "exec {_rd}<&${COPROC[0]}"
+    conn_read_fd="${_rd}"; conn_write_fd="${COPROC[1]}"
+  fi
+  conn_is_tls=1
+}
+
+# Header-dump FD: fixed to avoid needing bash 4.1 dynamic FD allocation in zsh.
+_DUMP_FD=11
+_open_write_fd()  { eval "exec ${_DUMP_FD}>\"$1\""; }
+_close_write_fd() { eval "exec ${_DUMP_FD}>&-"; }
 
 # -- Argument parsing --
 while [[ $# -gt 0 ]]; do
@@ -105,11 +204,11 @@ fi
 parse_url() {
   local raw="$1"
   local re='^((https?)://)?([A-Za-z0-9._~%-]+)(:([0-9]+))?(/[^#]*)?(#.*)?$'
-  if [[ "$raw" =~ $re ]]; then
-    url_scheme="${BASH_REMATCH[2]:-http}"
-    url_host="${BASH_REMATCH[3]}"
-    url_port="${BASH_REMATCH[5]}"
-    url_path="${BASH_REMATCH[6]:-/}"
+  if _regex "${raw}" "${re}"; then
+    url_scheme="${_m[2]:-http}"
+    url_host="${_m[3]}"
+    url_port="${_m[5]}"
+    url_path="${_m[6]:-/}"
   else
     die "Malformed URL: ${raw}"
   fi
@@ -141,26 +240,9 @@ resolve_url() {
 # -- Connection management --
 open_connection() {
   if [[ "${url_scheme}" == "https" ]]; then
-    command -v openssl &>/dev/null || die "openssl is required for HTTPS"
-    # Run openssl s_client as a coproc to get separate read/write FDs.
-    # Duplicate the read end immediately: bash auto-closes TLS[0] when
-    # openssl exits, but the dup'd FD persists so we can drain the buffer.
-    coproc TLS { exec openssl s_client -quiet \
-      -connect "${url_host}:${url_port}" \
-      -servername "${url_host}" 2>/dev/null; }
-    local _rd
-    exec {_rd}<&"${TLS[0]}"
-    conn_read_fd="${_rd}"
-    conn_write_fd="${TLS[1]}"
-    # shellcheck disable=SC2153  # TLS_PID is set by coproc, not a typo
-    tls_pid="${TLS_PID}"
-    conn_is_tls=1
+    _tls_connect "${url_host}" "${url_port}"
   else
-    exec 3<>"/dev/tcp/${url_host}/${url_port}" \
-      || die "Could not connect to ${url_host}:${url_port}"
-    conn_read_fd=3
-    conn_write_fd=3
-    conn_is_tls=''
+    _tcp_connect "${url_host}" "${url_port}"
   fi
 }
 
@@ -172,8 +254,10 @@ close_connection() {
     wait "${tls_pid}" 2>/dev/null || true
     { eval "exec ${conn_read_fd}<&-"; } 2>/dev/null || true
     tls_pid=''
-  elif [[ "${conn_read_fd}" == "3" ]]; then
-    { exec 3>&-; } 2>/dev/null || true
+  elif [[ -n "${_IS_ZSH}" ]]; then
+    if [[ -n "${conn_read_fd}" ]]; then { ztcp -c "${conn_read_fd}"; } 2>/dev/null || true; fi
+  else
+    if [[ "${conn_read_fd}" == "3" ]]; then { exec 3>&-; } 2>/dev/null || true; fi
   fi
   conn_read_fd=''
   conn_write_fd=''
@@ -202,7 +286,7 @@ send_request() {
   vlog "> User-Agent: ${ua}"
 
   local h
-  for h in "${opt_headers[@]+"${opt_headers[@]}"}"; do
+  for h in "${opt_headers[@]}"; do
     printf '%s\r\n' "${h}" >&"${conn_write_fd}"
     vlog "> ${h}"
   done
@@ -222,7 +306,7 @@ send_request() {
 
   if [[ -n "${opt_data}" && -z "${opt_head}" ]]; then
     local byte_len
-    # ${#var} counts characters; LC_ALL=C in a subshell makes bash count bytes.
+    # ${#var} counts characters; LC_ALL=C in a subshell makes bash/zsh count bytes.
     byte_len=$(LC_ALL=C; echo "${#opt_data}")
     printf 'Content-Type: application/x-www-form-urlencoded\r\n' >&"${conn_write_fd}"
     printf 'Content-Length: %d\r\n' "${byte_len}" >&"${conn_write_fd}"
@@ -249,9 +333,9 @@ read_status_line() {
   [[ -n "${opt_head}" ]] && printf '%s\n' "${line}"
 
   local re='^HTTP/([0-9.]+) +([0-9]+) *(.*)$'
-  if [[ "${line}" =~ ${re} ]]; then
-    resp_code="${BASH_REMATCH[2]}"
-    resp_msg="${BASH_REMATCH[3]}"
+  if _regex "${line}" "${re}"; then
+    resp_code="${_m[2]}"
+    resp_msg="${_m[3]}"
   else
     die "Malformed HTTP status line: ${line}"
   fi
@@ -261,11 +345,12 @@ read_response_headers() {
   resp_location=''
   local dump_fd=''
   if [[ -n "${opt_dump_headers}" ]]; then
-    exec {dump_fd}>"${opt_dump_headers}" \
+    _open_write_fd "${opt_dump_headers}" \
       || die "Cannot open ${opt_dump_headers} for writing"
+    dump_fd="${_DUMP_FD}"
   fi
 
-  local raw line
+  local raw line lname
   local re='^([A-Za-z0-9-]+): *(.*)$'
   while IFS= read -r -u "${conn_read_fd}" raw; do
     line="${raw%$'\r'}"
@@ -273,13 +358,13 @@ read_response_headers() {
     vlog "< ${line}"
     [[ -n "${dump_fd}" ]] && printf '%s\n' "${line}" >&"${dump_fd}"
     [[ -n "${opt_head}" ]] && printf '%s\n' "${line}"
-    if [[ "${line}" =~ ${re} ]]; then
-      local lname="${BASH_REMATCH[1],,}"
-      [[ "${lname}" == "location" ]] && resp_location="${BASH_REMATCH[2]}"
+    if _regex "${line}" "${re}"; then
+      lname="$(_tolower "${_m[1]}")"
+      [[ "${lname}" == "location" ]] && resp_location="${_m[2]}"
     fi
   done
 
-  [[ -n "${dump_fd}" ]] && exec {dump_fd}>&-
+  [[ -n "${dump_fd}" ]] && _close_write_fd
 }
 
 # -- Main loop --
@@ -293,7 +378,7 @@ while true; do
   read_response_headers
 
   if [[ "${resp_code}" -ge 200 && "${resp_code}" -lt 300 ]]; then
-    # cat for binary-safe transfer (bash read drops null bytes).
+    # cat for binary-safe transfer (shell read drops null bytes).
     if [[ -z "${opt_head}" ]]; then
       if [[ -n "${opt_output}" ]]; then
         cat <&"${conn_read_fd}" > "${opt_output}" \

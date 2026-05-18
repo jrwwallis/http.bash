@@ -4,7 +4,7 @@ PYTEST  := python3 -m pytest
 TESTS   := tests/test_get.py tests/test_errors.py tests/test_cli.py \
            tests/test_redirects.py tests/test_https.py
 
-.PHONY: all test lint check clean
+.PHONY: all test test-zsh lint check clean
 
 all: check
 
@@ -16,6 +16,9 @@ lint:
 
 test:
 	$(PYTEST) $(TESTS) -v
+
+test-zsh:
+	$(PYTEST) tests/test_zsh_compat.py -v
 
 # Run a single test file: make test-get, make test-cli, etc.
 test-%:

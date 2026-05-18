@@ -267,3 +267,26 @@ def run(http_bash):
         return RunResult(result.returncode, result.stdout, result.stderr)
 
     return _run
+
+
+@pytest.fixture(scope="session")
+def zsh_run(http_bash):
+    """Return a callable that runs http.bash under zsh.
+
+    Sets _HTTP_SHELL_SELECTED=zsh so the bootstrap is skipped and the
+    script runs directly under zsh without re-exec overhead.
+    """
+
+    def _run(*args, input_data=None, timeout=10) -> RunResult:
+        env = {**os.environ, "_HTTP_SHELL_SELECTED": "zsh"}
+        result = subprocess.run(
+            ["zsh", http_bash, *args],
+            capture_output=True,
+            text=True,
+            input=input_data,
+            timeout=timeout,
+            env=env,
+        )
+        return RunResult(result.returncode, result.stdout, result.stderr)
+
+    return _run

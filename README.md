@@ -11,16 +11,16 @@ compiled HTTP library.
 
 The main use case is environments where you need to transfer a small, portable
 tool over a slow or restricted link and then use it immediately: embedded
-systems, minimal containers, CI bootstrap stages, and so on. A single bash
-script is easy to copy with `scp`, embed in a heredoc, or paste into a
-terminal, and it runs on any host that has bash 4.1+.
+systems, minimal containers, CI bootstrap stages, and so on. A single script
+is easy to copy with `scp`, embed in a heredoc, or paste into a terminal, and
+it runs on any host that has bash 4.1+ or zsh 5.x — including stock macOS.
 
 ## Design principles
 
-1. **Bash built-ins first.** Network I/O goes through `/dev/tcp`, response
-   parsing uses `read` and `[[ =~ ]]`, and header handling is pure bash string
-   manipulation. External tools are used only where bash fundamentally cannot
-   do the job.
+1. **Shell built-ins first.** Network I/O goes through `/dev/tcp` (bash) or
+   `ztcp` (zsh), response parsing uses `read` and `[[ =~ ]]`, and header
+   handling is pure shell string manipulation. External tools are used only
+   where the shell fundamentally cannot do the job.
 
 2. **Minimal, deliberate exceptions.** Two external dependencies are
    unavoidable:
@@ -50,12 +50,20 @@ terminal, and it runs on any host that has bash 4.1+.
 
 ## Requirements
 
-- bash 4.1+ (uses named `coproc` and dynamic file descriptor allocation)
+- **bash 4.1+** *or* **zsh 5.x** — the script works with either shell
 - `openssl` — for HTTPS and `-u` basic auth (optional for plain HTTP)
 - `cat` — for binary body output (present on virtually every Unix system)
 
-> macOS ships bash 3.2. Install a newer version via Homebrew:
-> `brew install bash`
+### macOS
+
+macOS ships with bash 3.2 (too old) and zsh 5.x (fully supported). The
+script detects the situation automatically at startup and re-execs under
+the best available shell:
+
+1. If a bash 4.1+ binary is found in `PATH` (e.g. from Homebrew: `brew install bash`), it is preferred.
+2. Otherwise, zsh is used — which works out of the box on any stock macOS system.
+
+No manual shell selection is needed; just run `./http.bash` as usual.
 
 ## Installation
 
@@ -220,5 +228,12 @@ make test-cli
 make test-redirects
 ```
 
+Run the zsh compatibility suite:
+
+```bash
+make test-zsh
+```
+
 Tests require Python 3 with `pytest` (`pip install -r requirements.txt`) and
-`openssl` for the HTTPS suite.
+`openssl` for the HTTPS suite. The zsh suite is automatically skipped if
+`zsh` is not installed.
